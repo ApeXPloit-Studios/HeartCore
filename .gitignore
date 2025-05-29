@@ -1,0 +1,5 @@
+*.spec
+/src/__pycache__
+/build
+/dist
+/src/projects.json

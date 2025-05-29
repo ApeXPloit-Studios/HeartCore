@@ -1,0 +1,5 @@
+wxPython
+PyYAML
+pillow
+pyinstaller
+requests
