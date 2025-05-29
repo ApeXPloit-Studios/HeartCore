@@ -5,11 +5,41 @@ import subprocess
 import requests
 import zipfile
 from io import BytesIO
+import yaml
 
 APP_NAME = "HeartCore"
-ENTRY_POINT = os.path.join("src", "app.py")
-ICON_PATH = os.path.join("src", "icon.ico")  # Optional: provide your own icon
+ENTRY_POINT = "app.py"
+ICON_PATH = "icon.ico"
 REQUIREMENTS = "requirements.txt"
+
+def get_project_libs(project_path):
+    """Get list of libraries from project's .heartproj file"""
+    proj_name = os.path.basename(project_path)
+    heartproj_path = os.path.join(project_path, f"{proj_name}.heartproj")
+    if not os.path.exists(heartproj_path):
+        return []
+    with open(heartproj_path, 'r', encoding='utf-8') as f:
+        project_data = yaml.safe_load(f)
+        return project_data.get('libs', [])
+
+def copy_project_libs(project_path, target_os, dist_path):
+    """Copy required libraries for the target OS to the dist folder"""
+    libs = get_project_libs(project_path)
+    if not libs:
+        return
+    
+    # Create libs directory in dist
+    libs_dst = os.path.join(dist_path, 'libs')
+    os.makedirs(libs_dst, exist_ok=True)
+    
+    # Copy each library from the appropriate OS folder
+    for lib in libs:
+        src = os.path.join('libs', target_os.lower(), lib)
+        if os.path.exists(src):
+            shutil.copy2(src, os.path.join(libs_dst, lib))
+            print(f"Copied library: {lib}")
+        else:
+            print(f"Warning: Library not found for {target_os}: {lib}")
 
 # Install dependencies
 print("Installing dependencies from requirements.txt ...")
@@ -52,6 +82,7 @@ if TARGET_OS == 'Windows':
         cmd.extend(["--icon", ICON_PATH])
     print("Running:", " ".join(cmd))
     subprocess.run(cmd, check=True)
+    
     # Download and extract LÖVE for Windows
     love_url = "https://github.com/love2d/love/releases/download/11.5/love-11.5-win64.zip"
     print(f"Downloading LÖVE for Windows from {love_url} ...")
@@ -69,12 +100,10 @@ if TARGET_OS == 'Windows':
                 subfolder = os.path.join(DIST_PATH, os.path.dirname(member))
                 if os.path.isdir(subfolder) and not os.listdir(subfolder):
                     os.rmdir(subfolder)
-    # Copy libs folder
-    libs_src = os.path.join(os.getcwd(), 'libs')
-    libs_dst = os.path.join(DIST_PATH, 'libs')
-    if os.path.exists(libs_src):
-        print(f"Copying libraries from {libs_src} to {libs_dst} ...")
-        shutil.copytree(libs_src, libs_dst)
+    
+    # Copy project libraries for the target OS
+    copy_project_libs(os.getcwd(), TARGET_OS, DIST_PATH)
+    
     print(f"\nBuild complete! Check the '{DIST_PATH}' folder for the executable and love.exe.")
 else:
     print(f"Build for {TARGET_OS} is not implemented yet.") 
