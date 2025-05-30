@@ -532,8 +532,12 @@ class ExportDialog(wx.Dialog):
         vbox.Add(self.desc_ctrl, 1, wx.EXPAND|wx.LEFT|wx.RIGHT|wx.BOTTOM, 5)
 
         # Buttons
-        btns = self.CreateSeparatedButtonSizer(wx.OK|wx.CANCEL)
-        vbox.Add(btns, 0, wx.EXPAND|wx.ALL, 5)
+        button_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        ok_button = wx.Button(panel, wx.ID_OK, "OK")
+        cancel_button = wx.Button(panel, wx.ID_CANCEL, "Cancel")
+        button_sizer.Add(ok_button, 0, wx.ALL, 5)
+        button_sizer.Add(cancel_button, 0, wx.ALL, 5)
+        vbox.Add(button_sizer, 0, wx.ALIGN_CENTER|wx.ALL, 5)
 
         panel.SetSizer(vbox)
 
