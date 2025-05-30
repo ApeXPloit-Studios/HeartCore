@@ -9,17 +9,42 @@ import yaml
 import platform
 import zipfile
 import subprocess
+import glob
+import sys
 
 LIBS_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'libs')
+RUNTIMES_PATH = os.path.join(os.path.dirname(os.path.abspath(sys.executable)), 'runtimes')
 CURRENT_OS = platform.system().lower()
 
 def get_available_libs():
+    """Get list of available libraries from the libs directory"""
     if not os.path.exists(LIBS_PATH):
         return []
-    os_libs_path = os.path.join(LIBS_PATH, CURRENT_OS)
-    if not os.path.exists(os_libs_path):
+    return [d for d in os.listdir(LIBS_PATH) 
+            if os.path.isdir(os.path.join(LIBS_PATH, d))]
+
+def get_lib_files(lib_name, target_os):
+    """Get list of library files for a specific library and OS"""
+    lib_path = os.path.join(LIBS_PATH, lib_name, target_os.lower())
+    if not os.path.exists(lib_path):
         return []
-    return [f for f in os.listdir(os_libs_path) if os.path.isfile(os.path.join(os_libs_path, f))]
+    return [f for f in os.listdir(lib_path) 
+            if os.path.isfile(os.path.join(lib_path, f))]
+
+def get_available_runtimes():
+    """Get list of available Love2D runtime versions"""
+    if not os.path.exists(RUNTIMES_PATH):
+        return []
+    return [d for d in os.listdir(RUNTIMES_PATH) 
+            if os.path.isdir(os.path.join(RUNTIMES_PATH, d))]
+
+def get_available_platforms(version):
+    """Get list of available platforms for a specific Love2D version"""
+    version_path = os.path.join(RUNTIMES_PATH, version)
+    if not os.path.exists(version_path):
+        return []
+    return [d for d in os.listdir(version_path) 
+            if os.path.isdir(os.path.join(version_path, d))]
 
 class ProjectManagerFrame(wx.Frame):
     def __init__(self):
@@ -95,7 +120,7 @@ class ProjectManagerFrame(wx.Frame):
         self.selected_index = None
 
     def OnCreate(self, event):
-        dlg = CreateProjectDialog(self)
+        dlg = ProjectDialog(self)
         if dlg.ShowModal() == wx.ID_OK:
             data = dlg.GetData()
             name = data['name']
@@ -105,6 +130,7 @@ class ProjectManagerFrame(wx.Frame):
             version = data['version']
             author = data['author']
             selected_libs = data.get('libs', [])
+            love_version = data['love_version']
             proj_path = os.path.join(path, name)
             content_path = os.path.join(proj_path, 'content')
             os.makedirs(content_path, exist_ok=True)
@@ -128,7 +154,8 @@ class ProjectManagerFrame(wx.Frame):
                 'description': description,
                 'version': version,
                 'author': author,
-                'libs': selected_libs  # Store just the library references
+                'libs': selected_libs,  # Store just the library references
+                'love_version': love_version  # Store the Love2D version
             }
             with open(os.path.join(proj_path, f"{name}.heartproj"), "w", encoding="utf-8") as f:
                 yaml.dump(meta, f, Dumper=QuotedDumper, default_flow_style=False, allow_unicode=True)
@@ -179,6 +206,29 @@ class ProjectManagerFrame(wx.Frame):
 
     def OnEdit(self, event):
         if self.selected_index is not None:
+            project = self.projects[self.selected_index]
+            dlg = ProjectDialog(self, project_path=project['path'], edit_mode=True)
+            if dlg.ShowModal() == wx.ID_OK:
+                data = dlg.GetData()
+                proj_name = os.path.basename(project['path'])
+                heartproj_path = os.path.join(project['path'], f"{proj_name}.heartproj")
+                # Update .heartproj file
+                class QuotedDumper(yaml.SafeDumper):
+                    pass
+                def quoted_presenter(dumper, data):
+                    return dumper.represent_scalar('tag:yaml.org,2002:str', data, style='"')
+                QuotedDumper.add_representer(str, quoted_presenter)
+                meta = {
+                    'name': data['name'],
+                    'description': data['description'],
+                    'version': data['version'],
+                    'author': data['author'],
+                    'libs': data.get('libs', []),
+                    'love_version': data['love_version']
+                }
+                with open(heartproj_path, "w", encoding="utf-8") as f:
+                    yaml.dump(meta, f, Dumper=QuotedDumper, default_flow_style=False, allow_unicode=True)
+                self.RefreshList()
             path = self.projects[self.selected_index]["path"]
             os.startfile(path)
 
@@ -220,66 +270,101 @@ class ProjectManagerFrame(wx.Frame):
 
     def ExportProject(self, project, export_data):
         try:
-            # Create .love file
-            love_path = os.path.join(export_data['output_dir'], f"{project['name']}.love")
-            with zipfile.ZipFile(love_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-                for root, dirs, files in os.walk(project['path']):
-                    for file in files:
-                        if file.endswith('.heartproj'):  # Skip project metadata
-                            continue
-                        file_path = os.path.join(root, file)
-                        arcname = os.path.relpath(file_path, project['path'])
-                        zipf.write(file_path, arcname)
+            # Read project metadata to get Love2D version
+            proj_name = os.path.basename(project['path'])
+            heartproj_path = os.path.join(project['path'], f"{proj_name}.heartproj")
+            if not os.path.exists(heartproj_path):
+                raise Exception("Project metadata file (.heartproj) not found")
+            
+            with open(heartproj_path, 'r', encoding='utf-8') as f:
+                project_data = yaml.safe_load(f)
+                love_version = project_data.get('love_version')
+                if not love_version:
+                    raise Exception("Love2D version not specified in project metadata")
+            
+            # Create temp directory for build process
+            temp_dir = os.path.join(export_data['output_dir'], 'temp_build')
+            os.makedirs(temp_dir, exist_ok=True)
+            
+            try:
+                # Create .love file
+                love_path = os.path.join(temp_dir, f"{project['name']}.love")
+                with zipfile.ZipFile(love_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                    for root, dirs, files in os.walk(project['path']):
+                        for file in files:
+                            if file.endswith('.heartproj'):  # Skip project metadata
+                                continue
+                            file_path = os.path.join(root, file)
+                            arcname = os.path.relpath(file_path, project['path'])
+                            zipf.write(file_path, arcname)
 
-            # Platform-specific export
-            if export_data['platform'] == 'Windows':
-                self.ExportWindows(project, export_data, love_path)
-            elif export_data['platform'] == 'MacOS':
-                self.ExportMacOS(project, export_data, love_path)
-            elif export_data['platform'] == 'Linux':
-                self.ExportLinux(project, export_data, love_path)
-
-            wx.MessageBox(f"Project exported successfully to {export_data['output_dir']}", "Export Complete")
+                # Platform-specific export
+                platform = export_data['platform']
+                runtime_dir = os.path.join(RUNTIMES_PATH, love_version, platform.lower())
+                if not os.path.exists(runtime_dir):
+                    wx.MessageBox(f"Warning: No runtime found for {platform} ({love_version}) in runtimes folder. Export will skip copying the runtime.", "Export Warning", wx.OK | wx.ICON_WARNING)
+                    # Still copy .love and libs, but skip runtime
+                    if platform == 'Windows':
+                        # Only copy .love and libs
+                        shutil.copy2(love_path, os.path.join(export_data['output_dir'], f"{project['name']}.love"))
+                        self.copy_project_libs(project['path'], 'Windows', export_data['output_dir'])
+                    elif platform == 'MacOS':
+                        shutil.copy2(love_path, os.path.join(export_data['output_dir'], f"{project['name']}.love"))
+                        self.copy_project_libs(project['path'], 'MacOS', export_data['output_dir'])
+                    elif platform == 'Linux':
+                        shutil.copy2(love_path, os.path.join(export_data['output_dir'], f"{project['name']}.love"))
+                        self.copy_project_libs(project['path'], 'Linux', export_data['output_dir'])
+                else:
+                    if platform == 'Windows':
+                        self.ExportWindows(project, export_data, love_path, temp_dir, love_version)
+                    elif platform == 'MacOS':
+                        self.ExportMacOS(project, export_data, love_path, temp_dir, love_version)
+                    elif platform == 'Linux':
+                        self.ExportLinux(project, export_data, love_path, temp_dir, love_version)
+                wx.MessageBox(f"Project exported successfully to {export_data['output_dir']}", "Export Complete")
+            finally:
+                # Clean up temp directory
+                if os.path.exists(temp_dir):
+                    shutil.rmtree(temp_dir)
         except Exception as e:
             wx.MessageBox(f"Export failed: {str(e)}", "Export Error", wx.OK | wx.ICON_ERROR)
 
-    def ExportWindows(self, project, export_data, love_path):
-        # Download Love2D if needed
-        love_url = "https://github.com/love2d/love/releases/download/11.5/love-11.5-win64.zip"
-        love_zip = os.path.join(export_data['output_dir'], "love.zip")
-        if not os.path.exists(love_zip):
-            import requests
-            r = requests.get(love_url)
-            with open(love_zip, 'wb') as f:
-                f.write(r.content)
-
-        # Extract Love2D
-        with zipfile.ZipFile(love_zip, 'r') as zipf:
-            zipf.extractall(export_data['output_dir'])
+    def ExportWindows(self, project, export_data, love_path, temp_dir, love_version):
+        # Get Love2D runtime from app directory
+        runtime_dir = os.path.join(RUNTIMES_PATH, love_version, 'windows')
+        if not os.path.exists(runtime_dir):
+            raise Exception(f"Love2D runtime files not found for version {love_version} on Windows. Please ensure the runtime files are in the 'runtimes/{love_version}/windows' directory.")
+        
+        # Copy Love2D runtime files to temp directory
+        for file in os.listdir(runtime_dir):
+            src = os.path.join(runtime_dir, file)
+            dst = os.path.join(temp_dir, file)
+            if os.path.isfile(src):
+                shutil.copy2(src, dst)
 
         # Create fused executable
-        love_exe = os.path.join(export_data['output_dir'], "love.exe")
+        love_exe = os.path.join(temp_dir, "love.exe")
         output_exe = os.path.join(export_data['output_dir'], f"{project['name']}.exe")
         
         # Use PowerShell to combine files
         cmd = f'Get-Content "{love_exe}","{love_path}" -Encoding Byte | Set-Content "{output_exe}" -Encoding Byte'
         subprocess.run(['powershell', '-Command', cmd], check=True)
 
-        # Copy required DLLs
+        # Copy required DLLs to output directory
         for dll in ['SDL2.dll', 'OpenAL32.dll', 'love.dll', 'lua51.dll', 'mpg123.dll', 'msvcp120.dll', 'msvcr120.dll']:
-            src = os.path.join(export_data['output_dir'], dll)
+            src = os.path.join(temp_dir, dll)
             if os.path.exists(src):
                 shutil.copy2(src, os.path.join(export_data['output_dir'], dll))
 
         # Copy project libraries
         self.copy_project_libs(project['path'], 'Windows', export_data['output_dir'])
 
-        # Clean up
-        os.remove(love_zip)
-        os.remove(love_path)
-        os.remove(love_exe)
-
-    def ExportMacOS(self, project, export_data, love_path):
+    def ExportMacOS(self, project, export_data, love_path, temp_dir, love_version):
+        # Get Love2D runtime from app directory
+        runtime_dir = os.path.join(RUNTIMES_PATH, love_version, 'macos')
+        if not os.path.exists(runtime_dir):
+            raise Exception(f"Love2D runtime files not found for version {love_version} on MacOS. Please ensure the runtime files are in the 'runtimes/{love_version}/macos' directory.")
+        
         # Create .app structure
         app_name = f"{project['name']}.app"
         app_path = os.path.join(export_data['output_dir'], app_name)
@@ -322,33 +407,26 @@ class ProjectManagerFrame(wx.Frame):
         with open(os.path.join(contents_path, "Info.plist"), 'w') as f:
             f.write(plist_content)
 
-        # Download and copy Love2D
-        love_url = "https://github.com/love2d/love/releases/download/11.5/love-11.5-macos.zip"
-        love_zip = os.path.join(export_data['output_dir'], "love.zip")
-        if not os.path.exists(love_zip):
-            import requests
-            r = requests.get(love_url)
-            with open(love_zip, 'wb') as f:
-                f.write(r.content)
-
-        with zipfile.ZipFile(love_zip, 'r') as zipf:
-            zipf.extractall(export_data['output_dir'])
-
-        # Copy Love2D binary
-        shutil.copy2(os.path.join(export_data['output_dir'], "love.app/Contents/MacOS/love"), 
-                    os.path.join(macos_path, "love"))
+        # Copy Love2D binary and libraries
+        for file in os.listdir(runtime_dir):
+            src = os.path.join(runtime_dir, file)
+            if file == 'love':
+                dst = os.path.join(macos_path, file)
+            else:
+                dst = os.path.join(resources_path, file)
+            if os.path.isfile(src):
+                shutil.copy2(src, dst)
 
         # Copy project libraries
         self.copy_project_libs(project['path'], 'MacOS', resources_path)
 
-        # Clean up
-        os.remove(love_zip)
-        os.remove(love_path)
-        shutil.rmtree(os.path.join(export_data['output_dir'], "love.app"))
-
-    def ExportLinux(self, project, export_data, love_path):
-        # For Linux, we'll create an AppImage
-        # This is a simplified version - you might want to add more AppImage configuration
+    def ExportLinux(self, project, export_data, love_path, temp_dir, love_version):
+        # Get Love2D runtime from app directory
+        runtime_dir = os.path.join(RUNTIMES_PATH, love_version, 'linux')
+        if not os.path.exists(runtime_dir):
+            raise Exception(f"Love2D runtime files not found for version {love_version} on Linux. Please ensure the runtime files are in the 'runtimes/{love_version}/linux' directory.")
+        
+        # Create AppDir structure
         appimage_dir = os.path.join(export_data['output_dir'], "AppDir")
         os.makedirs(appimage_dir, exist_ok=True)
 
@@ -365,6 +443,13 @@ Comment={export_data.get('description', '')}
 
         # Copy .love file
         shutil.copy2(love_path, os.path.join(appimage_dir, "game.love"))
+
+        # Copy Love2D runtime files
+        for file in os.listdir(runtime_dir):
+            src = os.path.join(runtime_dir, file)
+            dst = os.path.join(appimage_dir, file)
+            if os.path.isfile(src):
+                shutil.copy2(src, dst)
 
         # Copy project libraries
         self.copy_project_libs(project['path'], 'Linux', appimage_dir)
@@ -388,28 +473,34 @@ Comment={export_data.get('description', '')}
         if not libs:
             return
         
-        # Create libs directory
-        libs_dst = os.path.join(dest_path, 'libs')
-        os.makedirs(libs_dst, exist_ok=True)
-        
-        # Copy each library
+        # Copy each library's files
         for lib in libs:
-            src = os.path.join(LIBS_PATH, target_os.lower(), lib)
-            if os.path.exists(src):
-                shutil.copy2(src, os.path.join(libs_dst, lib))
+            lib_files = get_lib_files(lib, target_os)
+            for file in lib_files:
+                src = os.path.join(LIBS_PATH, lib, target_os.lower(), file)
+                if os.path.exists(src):
+                    shutil.copy2(src, os.path.join(dest_path, file))
 
-class CreateProjectDialog(wx.Dialog):
-    def __init__(self, parent):
-        super().__init__(parent, title="Create New Project", size=(420, 500))
+class ProjectDialog(wx.Dialog):
+    def __init__(self, parent, project_path=None, edit_mode=False):
+        super().__init__(parent, title="Create New Project" if not edit_mode else "Edit Project", size=(420, 500))
+        self.project_path = project_path
+        self.edit_mode = edit_mode
+        self.InitUI()
+        self.Center()
+
+    def InitUI(self):
         main_sizer = wx.BoxSizer(wx.VERTICAL)
         panel = wx.Panel(self)
         vbox = wx.BoxSizer(wx.VERTICAL)
+
         # Project Name
         hbox_name = wx.BoxSizer(wx.HORIZONTAL)
         hbox_name.Add(wx.StaticText(panel, label="Project Name:"), 0, wx.ALIGN_CENTER_VERTICAL|wx.RIGHT, 8)
         self.name_ctrl = wx.TextCtrl(panel)
         hbox_name.Add(self.name_ctrl, 1)
         vbox.Add(hbox_name, 0, wx.EXPAND|wx.ALL, 8)
+
         # Project Path
         hbox_path = wx.BoxSizer(wx.HORIZONTAL)
         hbox_path.Add(wx.StaticText(panel, label="Project Path:"), 0, wx.ALIGN_CENTER_VERTICAL|wx.RIGHT, 8)
@@ -419,6 +510,16 @@ class CreateProjectDialog(wx.Dialog):
         browse_btn.Bind(wx.EVT_BUTTON, self.OnBrowsePath)
         hbox_path.Add(browse_btn, 0)
         vbox.Add(hbox_path, 0, wx.EXPAND|wx.LEFT|wx.RIGHT|wx.BOTTOM, 8)
+
+        # Love2D Version
+        hbox_love_version = wx.BoxSizer(wx.HORIZONTAL)
+        hbox_love_version.Add(wx.StaticText(panel, label="Love2D Version:"), 0, wx.ALIGN_CENTER_VERTICAL|wx.RIGHT, 8)
+        self.love_version_choice = wx.Choice(panel, choices=get_available_runtimes())
+        if self.love_version_choice.GetCount() > 0:
+            self.love_version_choice.SetSelection(0)
+        hbox_love_version.Add(self.love_version_choice, 1)
+        vbox.Add(hbox_love_version, 0, wx.EXPAND|wx.LEFT|wx.RIGHT|wx.BOTTOM, 8)
+
         # Icon
         hbox_icon = wx.BoxSizer(wx.HORIZONTAL)
         hbox_icon.Add(wx.StaticText(panel, label="Icon (optional):"), 0, wx.ALIGN_CENTER_VERTICAL|wx.RIGHT, 8)
@@ -428,22 +529,26 @@ class CreateProjectDialog(wx.Dialog):
         icon_btn.Bind(wx.EVT_BUTTON, self.OnBrowseIcon)
         hbox_icon.Add(icon_btn, 0)
         vbox.Add(hbox_icon, 0, wx.EXPAND|wx.LEFT|wx.RIGHT|wx.BOTTOM, 8)
+
         # Description
         vbox.Add(wx.StaticText(panel, label="Description (optional):"), 0, wx.LEFT|wx.RIGHT|wx.TOP, 8)
         self.desc_ctrl = wx.TextCtrl(panel, style=wx.TE_MULTILINE)
         vbox.Add(self.desc_ctrl, 0, wx.EXPAND|wx.LEFT|wx.RIGHT|wx.BOTTOM, 8)
+
         # Version
         hbox_version = wx.BoxSizer(wx.HORIZONTAL)
         hbox_version.Add(wx.StaticText(panel, label="Version:"), 0, wx.ALIGN_CENTER_VERTICAL|wx.RIGHT, 8)
         self.version_ctrl = wx.TextCtrl(panel, value="1.0.0")
         hbox_version.Add(self.version_ctrl, 1)
         vbox.Add(hbox_version, 0, wx.EXPAND|wx.LEFT|wx.RIGHT|wx.BOTTOM, 8)
+
         # Author
         hbox_author = wx.BoxSizer(wx.HORIZONTAL)
         hbox_author.Add(wx.StaticText(panel, label="Author:"), 0, wx.ALIGN_CENTER_VERTICAL|wx.RIGHT, 8)
         self.author_ctrl = wx.TextCtrl(panel)
         hbox_author.Add(self.author_ctrl, 1)
         vbox.Add(hbox_author, 0, wx.EXPAND|wx.LEFT|wx.RIGHT|wx.BOTTOM, 8)
+
         # Library selection
         libs = get_available_libs()
         self.lib_checkboxes = []
@@ -453,12 +558,23 @@ class CreateProjectDialog(wx.Dialog):
                 cb = wx.CheckBox(panel, label=lib)
                 vbox.Add(cb, 0, wx.LEFT|wx.RIGHT|wx.BOTTOM, 12)
                 self.lib_checkboxes.append(cb)
+        else:
+            vbox.Add(wx.StaticText(panel, label="No libraries found in libs folder."), 0, wx.LEFT|wx.RIGHT|wx.TOP, 8)
+
         # Buttons
-        btns = self.CreateSeparatedButtonSizer(wx.OK|wx.CANCEL)
+        button_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        ok_button = wx.Button(panel, wx.ID_OK, "OK")
+        cancel_button = wx.Button(panel, wx.ID_CANCEL, "Cancel")
+        button_sizer.Add(ok_button, 0, wx.ALL, 5)
+        button_sizer.Add(cancel_button, 0, wx.ALL, 5)
+        vbox.Add(button_sizer, 0, wx.ALIGN_CENTER|wx.ALL, 5)
+
         panel.SetSizer(vbox)
         main_sizer.Add(panel, 1, wx.EXPAND|wx.ALL, 0)
-        main_sizer.Add(btns, 0, wx.ALIGN_CENTER|wx.ALL, 8)
         self.SetSizer(main_sizer)
+
+        if self.edit_mode:
+            self.LoadProjectData()
 
     def OnBrowsePath(self, event):
         dlg = wx.DirDialog(self, "Select Project Folder")
@@ -472,6 +588,22 @@ class CreateProjectDialog(wx.Dialog):
             self.icon_ctrl.SetValue(dlg.GetPath())
         dlg.Destroy()
 
+    def LoadProjectData(self):
+        if self.project_path:
+            with open(os.path.join(self.project_path, f"{os.path.basename(self.project_path)}.heartproj"), 'r', encoding='utf-8') as f:
+                project_data = yaml.safe_load(f)
+                self.name_ctrl.SetValue(project_data['name'])
+                self.path_ctrl.SetValue(self.project_path)
+                self.love_version_choice.SetSelection(self.love_version_choice.FindString(project_data['love_version']))
+                self.icon_ctrl.SetValue(project_data.get('icon', ''))
+                self.desc_ctrl.SetValue(project_data.get('description', ''))
+                self.version_ctrl.SetValue(project_data['version'])
+                self.author_ctrl.SetValue(project_data['author'])
+                for lib in project_data.get('libs', []):
+                    for cb in self.lib_checkboxes:
+                        if cb.GetLabel() == lib:
+                            cb.SetValue(True)
+
     def GetData(self):
         libs = [cb.GetLabel() for cb in getattr(self, 'lib_checkboxes', []) if cb.GetValue()]
         return {
@@ -481,7 +613,8 @@ class CreateProjectDialog(wx.Dialog):
             'description': self.desc_ctrl.GetValue(),
             'version': self.version_ctrl.GetValue(),
             'author': self.author_ctrl.GetValue(),
-            'libs': libs
+            'libs': libs,
+            'love_version': self.love_version_choice.GetString(self.love_version_choice.GetSelection())
         }
 
 class ExportDialog(wx.Dialog):
@@ -501,6 +634,11 @@ class ExportDialog(wx.Dialog):
         self.platform_choice = wx.Choice(panel, choices=['Windows', 'MacOS', 'Linux'])
         platform_sizer.Add(self.platform_choice, 0, wx.EXPAND|wx.ALL, 5)
         vbox.Add(platform_sizer, 0, wx.EXPAND|wx.ALL, 5)
+
+        # Runtime warning
+        self.runtime_warning = wx.StaticText(panel, label="")
+        self.runtime_warning.SetForegroundColour(wx.Colour(255, 140, 0))  # Orange
+        vbox.Add(self.runtime_warning, 0, wx.LEFT|wx.RIGHT|wx.BOTTOM, 5)
 
         # Output directory
         dir_box = wx.StaticBox(panel, label="Output Directory")
@@ -548,8 +686,9 @@ class ExportDialog(wx.Dialog):
                                  self.platform_choice.GetString(0).lower())
         self.dir_ctrl.SetValue(default_dir)
 
-        # Bind platform change
+        # Bind events
         self.platform_choice.Bind(wx.EVT_CHOICE, self.OnPlatformChange)
+        self.OnPlatformChange(None)  # Set initial warning
 
     def OnBrowseDir(self, event):
         dlg = wx.DirDialog(self, "Select Output Directory")
@@ -558,8 +697,24 @@ class ExportDialog(wx.Dialog):
         dlg.Destroy()
 
     def OnPlatformChange(self, event):
-        # Update default output directory when platform changes
         platform = self.platform_choice.GetString(self.platform_choice.GetSelection()).lower()
+        # Get Love2D version from project .heartproj
+        love_version = None
+        if hasattr(self, 'project') and self.project:
+            proj_name = os.path.basename(self.project['path'])
+            heartproj_path = os.path.join(self.project['path'], f"{proj_name}.heartproj")
+            if os.path.exists(heartproj_path):
+                with open(heartproj_path, 'r', encoding='utf-8') as f:
+                    project_data = yaml.safe_load(f)
+                    love_version = project_data.get('love_version')
+        if not love_version:
+            love_version = '11.5'  # fallback default
+        runtime_dir = os.path.join(RUNTIMES_PATH, love_version, platform)
+        if not os.path.exists(runtime_dir):
+            self.runtime_warning.SetLabel(f"Warning: No runtime found for {platform} ({love_version}) in runtimes folder. Export will skip copying the runtime.")
+        else:
+            self.runtime_warning.SetLabel("")
+        # Update default output directory
         default_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 
                                  'exports', 
                                  self.project['name'],
